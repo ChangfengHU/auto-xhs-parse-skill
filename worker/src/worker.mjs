@@ -232,13 +232,27 @@ async function uploadResponseImagesToR2(result, cookieStr) {
     }
   }
 
-  // 视频：上传视频文件
-  if (result.mediaType === 'video' && result.videoUrl) {
-    try {
-      result.videoUrl = await uploadToR2(result.videoUrl, `${noteId}.mp4`, cookieStr);
-    } catch (err) {
-      errors.push(`video: ${err.message}`);
-    }
+  // 视频：并行上传视频 + 封面图
+  if (result.mediaType === 'video') {
+    await Promise.all([
+      // 视频文件
+      result.videoUrl
+        ? uploadToR2(result.videoUrl, `${noteId}.mp4`, cookieStr)
+            .then(u => { result.videoUrl = u; })
+            .catch(err => errors.push(`video: ${err.message}`))
+        : Promise.resolve(),
+      // 封面图（images[0].previewUrl 是 HTML 中新鲜的 CDN 地址）
+      result.images.length > 0
+        ? uploadToR2(result.images[0].previewUrl || result.coverUrl, `${noteId}_cover.jpg`, cookieStr)
+            .then(u => {
+              result.images[0].previewUrl = u;
+              result.images[0].originalUrl = u;
+              result.coverUrl = u;
+              result.noteData.coverUrl = u;
+            })
+            .catch(err => errors.push(`cover: ${err.message}`))
+        : Promise.resolve(),
+    ]);
   }
 
   if (errors.length) result._uploadErrors = errors;
