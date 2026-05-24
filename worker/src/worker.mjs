@@ -159,6 +159,91 @@ function buildVideo(noteData, coverUrl) {
   return url ? { url, coverUrl } : undefined;
 }
 
+// ── R2 上传 ──────────────────────────────────────────────────────────────────
+
+const R2_UPLOAD_URL = 'https://upload-r2.vyibc.com';
+const R2_TOKEN = 'yt-research-token-2026';
+const R2_DOMAIN = 'https://skill.vyibc.com';
+const R2_PATH = 'xhs';
+
+function parseR2Url(body, fallback) {
+  if (!body || typeof body !== 'object') return fallback;
+  for (const key of ['url', 'publicUrl', 'public_url', 'fileUrl', 'file_url']) {
+    const v = body[key];
+    if (typeof v === 'string' && v.startsWith('http')) return v;
+  }
+  if (body.data && typeof body.data === 'object') {
+    for (const key of ['url', 'publicUrl', 'public_url']) {
+      const v = body.data[key];
+      if (typeof v === 'string' && v.startsWith('http')) return v;
+    }
+  }
+  return fallback;
+}
+
+async function uploadToR2(srcUrl, fileName, cookieStr) {
+  const fallback = `${R2_DOMAIN}/${R2_PATH}/${fileName}`;
+  const dlHeaders = { 'User-Agent': USER_AGENT, 'Referer': 'https://www.xiaohongshu.com/' };
+  if (cookieStr) dlHeaders['Cookie'] = cookieStr;
+
+  const imgRes = await fetch(srcUrl, { headers: dlHeaders });
+  if (!imgRes.ok) throw new Error(`download HTTP ${imgRes.status} from ${srcUrl}`);
+
+  const blob = await imgRes.blob();
+  const form = new FormData();
+  form.append('file', blob, fileName);
+  form.append('domain', R2_DOMAIN);
+  form.append('name', fileName);
+  form.append('path', R2_PATH);
+
+  const upRes = await fetch(R2_UPLOAD_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${R2_TOKEN}` },
+    body: form,
+  });
+  if (!upRes.ok) {
+    const txt = await upRes.text().catch(() => '');
+    throw new Error(`R2 upload HTTP ${upRes.status}: ${txt.slice(0, 200)}`);
+  }
+  try { return parseR2Url(await upRes.json(), fallback); } catch { return fallback; }
+}
+
+async function uploadResponseImagesToR2(result, cookieStr) {
+  const noteId = result.noteId;
+  const errors = [];
+
+  // 图文：并行上传所有图片（用 previewUrl，是 HTML 里的新鲜 CDN 地址）
+  if (result.mediaType === 'image' && result.images.length > 0) {
+    await Promise.all(result.images.map(async img => {
+      // previewUrl 是 HTML 中直接提取的 CDN 地址（含时效签名），优先用它
+      const srcUrl = img.previewUrl || img.originalUrl;
+      const fileName = `${noteId}_${img.index}.jpg`;
+      try {
+        const r2Url = await uploadToR2(srcUrl, fileName, cookieStr);
+        img.originalUrl = r2Url;
+        img.previewUrl = r2Url;
+      } catch (err) {
+        errors.push(`image[${img.index}]: ${err.message}`);
+      }
+    }));
+    if (result.images[0].originalUrl.startsWith('https://skill.vyibc.com')) {
+      result.coverUrl = result.images[0].originalUrl;
+      result.noteData.coverUrl = result.coverUrl;
+    }
+  }
+
+  // 视频：上传视频文件
+  if (result.mediaType === 'video' && result.videoUrl) {
+    try {
+      result.videoUrl = await uploadToR2(result.videoUrl, `${noteId}.mp4`, cookieStr);
+    } catch (err) {
+      errors.push(`video: ${err.message}`);
+    }
+  }
+
+  if (errors.length) result._uploadErrors = errors;
+}
+
 // ── 响应构建 ─────────────────────────────────────────────────────────────────
 
 function buildResponse(noteData, resolvedUrl) {
@@ -273,6 +358,8 @@ export default {
       );
     }
 
-    return Response.json(buildResponse(noteData, resolvedUrl));
+    const result = buildResponse(noteData, resolvedUrl);
+    await uploadResponseImagesToR2(result, cookieStr);
+    return Response.json(result);
   },
 };
